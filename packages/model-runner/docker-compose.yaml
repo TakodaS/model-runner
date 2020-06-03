@@ -42,8 +42,8 @@ services:
       - MODEL_RUNNER_OUTPUT_DIR=/data/output
       - AZURE_STORAGE_ACCOUNT
       - AZURE_STORAGE_CONTAINER
-      - DOCKER_USER
-      - DOCKER_PASSWORD
+        #- DOCKER_USER
+        #- DOCKER_PASSWORD
       - WOLFRAM_USER
       - WOLFRAM_PASSWORD
     tty: true
