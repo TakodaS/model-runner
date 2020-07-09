@@ -1,12 +1,17 @@
 import * as path from 'path'
 import * as fs from 'fs'
-import { input } from '@covid-modeling/api'
-import { output } from '@covid-modeling/api'
+import { input, output } from '@covid-modeling/api'
 
 import { logger } from './logger'
 import { DateTime } from 'luxon'
 import { RunnerModelInput, Model } from './model'
-import { BaselModelConnector, AlgorithmResult, Scenario } from './basel-api'
+import {
+  BaselModelConnector,
+  AlgorithmResult,
+  ScenarioData,
+  ScenarioArray,
+  MitigationInterval,
+} from './basel-api'
 // https://en.wikipedia.org/wiki/ISO_3166-2
 import { REGION_DATA } from './regions'
 import { spawn } from 'child_process'
@@ -40,7 +45,7 @@ export class BaselModel implements Model {
     return {
       modelInput,
       binaryPath: path.join(this.binDir, 'run-basel-model'),
-      inputFiles: [inputFile],
+      inputFile,
     }
   }
 
@@ -53,8 +58,12 @@ export class BaselModel implements Model {
     const logFile = path.join(this.logDir, 'basel.log')
     const logFd = fs.openSync(logFile, 'a')
 
-    const args = baselModelInput.inputFiles
-    args.push(outputFile)
+    const args = ['--scenario', baselModelInput.inputFile, '--out', outputFile]
+    logger.info(
+      'Running Basel model: %s %s',
+      baselModelInput.binaryPath,
+      args.join(' ')
+    )
 
     // Run the model and wait until it exits.
     const modelProcess = spawn(baselModelInput.binaryPath, args, {
@@ -112,39 +121,45 @@ export class BaselConnector implements BaselModelConnector {
     }
   }
 
-  translateInputIntoModel(modelInput: input.ModelInput): Scenario {
-    const defaultScenariosContents = fs.readFileSync(
-      path.join(this.dataDir, 'scenarios.json'),
-      'utf8'
-    )
-    const defaultScenarios = JSON.parse(defaultScenariosContents) as Scenario[]
+  translateInputIntoModel(modelInput: input.ModelInput): ScenarioData {
+    const scenarioDataPath = path.join(this.dataDir, 'scenarios.json')
+    logger.info(`Reading default scenario data from ${scenarioDataPath}`)
+    const defaultScenariosContents = fs.readFileSync(scenarioDataPath, 'utf8')
+    const defaultScenarios = JSON.parse(
+      defaultScenariosContents
+    ) as ScenarioArray
 
     const scenarioRegionKey = this.getScenarioRegionKey(
       modelInput.region,
       modelInput.subregion
     )
 
-    // The key is called `country` in the scenario JSON,
-    // even when identifying a subregion.
-    const scenario = defaultScenarios.find(s => s.country === scenarioRegionKey)
-    if (scenario === undefined) {
+    // The scenarios JSON has a top-level key for each supported region or subregion.
+    if (!defaultScenarios?.all) {
+      throw new Error('Found no default scenario data')
+    }
+    const scenarioData = defaultScenarios.all.find(
+      s => s.name === scenarioRegionKey
+    )
+    if (scenarioData === undefined) {
       throw new Error(
         `Could not find default scenario for region key ${scenarioRegionKey}`
       )
     }
+    const scenario = scenarioData.data
 
     const { interventionPeriods, r0 } = modelInput.parameters
 
     // If an r0 is provided, use it.
     // Otherwise use the model's default for the region.
     if (typeof r0 === 'number') {
-      scenario.allParams.epidemiological.r0 = r0
+      scenario.epidemiological.r0 = { begin: r0, end: r0 }
     }
 
     // Default to the simulation start date from the scenario date,
     // since this is assumed to match the initial number of cases.
     const tMinDefault = DateTime.fromJSDate(
-      new Date(scenario.allParams.simulation.simulationTimeRange.tMin),
+      new Date(scenario.simulation.simulationTimeRange.begin),
       {
         zone: 'utc',
       }
@@ -169,12 +184,12 @@ export class BaselConnector implements BaselModelConnector {
     }
     // HARDCODED CHOICE: End date is 720 days after start date.
     const tMax = tMin.plus({ days: 720 })
-    scenario.allParams.simulation.simulationTimeRange = {
-      tMin: tMin.toJSDate(),
-      tMax: tMax.toJSDate(),
+    scenario.simulation.simulationTimeRange = {
+      begin: tMin.toMillis(),
+      end: tMax.toMillis(),
     }
 
-    scenario.allParams.containment.mitigationIntervals = interventionPeriods.map(
+    scenario.mitigation.mitigationIntervals = interventionPeriods.map(
       (intervention, i) => {
         const startDate = DateTime.fromISO(intervention.startDate, {
           zone: 'utc',
@@ -186,21 +201,23 @@ export class BaselConnector implements BaselModelConnector {
           : tMax
         return {
           color: 'black',
-          id: 'basel-model-social-distancing-general-population',
           name: 'Social distancing - general population',
-          mitigationValue: intervention.reductionPopulationContact,
-          timeRange: {
-            tMin: startDate.toJSDate(),
-            tMax: endDate.toJSDate(),
+          transmissionReduction: {
+            begin: intervention.reductionPopulationContact,
+            end: intervention.reductionPopulationContact,
           },
-        }
+          timeRange: {
+            begin: startDate.toMillis(),
+            end: endDate.toMillis(),
+          },
+        } as MitigationInterval
       }
     )
 
     logger.info('Basel connector: transformed input')
-    logger.debug(scenario)
+    logger.debug(scenarioData)
 
-    return scenario
+    return scenarioData
   }
 
   static getMinMax(ts: number[]): [number, number] {
@@ -211,27 +228,22 @@ export class BaselConnector implements BaselModelConnector {
     runInput: BaselRunnerModelInput,
     specificOutput: AlgorithmResult
   ): output.ModelOutput {
-    const t0 = DateTime.fromMillis(
-      specificOutput.deterministic.trajectory[0].time,
-      {
-        zone: 'utc',
-      }
-    )
-    const deterministicTrajectory = specificOutput.deterministic.trajectory
-    // TODO: At time of writing, the model does not do a stochastic simulation.
-    // If this changes, use data from specificOutput.stochastic too,
-    // and verify that it has the same timestamps, or combine the timestamp arrays.
+    // The model produces trajectories at different percentile ranges.
+    // Here we use the middle trajectory.
+    // TODO: Consider using the other trajectories as well.
+    const middleTrajectory = specificOutput.trajectory.middle
+    const t0 = DateTime.fromMillis(middleTrajectory[0].time, {
+      zone: 'utc',
+    })
 
     // The model returns Unix timestamps in millis.
     // ModelOutput expects timestamps in days from t0.
-    const timestamps = deterministicTrajectory.map(
+    const timestamps = middleTrajectory.map(
       timePoint => DateTime.fromMillis(timePoint.time).diff(t0, 'days').days
     )
 
-    const currentData = deterministicTrajectory.map(
-      timePoint => timePoint.current
-    )
-    const cumulativeData = deterministicTrajectory.map(
+    const currentData = middleTrajectory.map(timePoint => timePoint.current)
+    const cumulativeData = middleTrajectory.map(
       timePoint => timePoint.cumulative
     )
 
@@ -254,7 +266,8 @@ export class BaselConnector implements BaselModelConnector {
 
     logger.debug('Basel connector: cumulative deaths')
     logger.debug(cumDeaths)
-    // The model reports cumulative deaths but not incidence of deaths,
+    // The model reports cumulative deaths and weekly incidence of deaths,
+    // but not daily incidence of deaths,
     // so read the cumulative data and convert back to pointwise.
     const incDeath = cumulativeToPointwise(cumDeaths)
 

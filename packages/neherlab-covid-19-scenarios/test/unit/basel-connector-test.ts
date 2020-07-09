@@ -1,42 +1,46 @@
 import { assert } from 'chai'
 import { input, output } from '@covid-modeling/api'
 
-import { AlgorithmResult, Scenario, AllParams } from '../../src/basel-api'
+import {
+  AlgorithmResult,
+  ScenarioData,
+  ScenarioDatum,
+  ScenarioArray,
+} from '../../src/basel-api'
 import { BaselConnector, BaselRunnerModelInput } from '../../src/basel'
 import * as path from 'path'
 import * as fs from 'fs'
+import { DateTime } from 'luxon'
 
-const TEST_ALL_PARAMS: AllParams = {
-  containment: {
+const TEST_SCENARIO_DATUM: ScenarioDatum = {
+  mitigation: {
     mitigationIntervals: [],
-    numberPoints: 0,
   },
   epidemiological: {
-    infectiousPeriod: 3.0,
-    latencyTime: 3.0,
-    lengthHospitalStay: 3.0,
-    lengthICUStay: 14.0,
+    infectiousPeriodDays: 3.0,
+    latencyDays: 3.0,
+    hospitalStayDays: 3.0,
+    icuStayDays: 14.0,
     overflowSeverity: 2.0,
     peakMonth: 0,
-    r0: 2.7,
+    r0: { begin: 2.7, end: 2.7 },
     seasonalForcing: 0.0,
   },
   population: {
-    ICUBeds: 2378,
-    cases: 'country name placeholder',
-    country: 'country name placeholder',
+    icuBeds: 2378,
+    caseCountsName: 'country name placeholder for case counts',
+    ageDistributionName: 'country name placeholder for age distribution',
     hospitalBeds: 96000,
     importsPerDay: 0.1,
     initialNumberOfCases: 10,
     populationServed: 24600000,
   },
   simulation: {
-    // Ignored
-    numberStochasticRuns: 0,
+    numberStochasticRuns: 10,
     simulationTimeRange: {
-      tMin: new Date('2020-04-01'),
+      begin: DateTime.fromISO('2020-04-01', { zone: 'utc' }).toMillis(),
       // Ignored
-      tMax: new Date(),
+      end: new Date().getTime(),
     },
   },
 }
@@ -129,59 +133,67 @@ suite('converting to Basel model input', () => {
         parameters,
       }
       // Write a default scenario to a file.
-      const scenario: Scenario = {
-        country: r.scenarioKey,
-        allParams: TEST_ALL_PARAMS,
+      const scenario: ScenarioData = {
+        name: r.scenarioKey,
+        data: TEST_SCENARIO_DATUM,
+      }
+      const scenarioArray: ScenarioArray = {
+        all: [scenario],
       }
       const scenarioFile = path.join(dataDir, 'scenarios.json')
-      fs.writeFileSync(scenarioFile, JSON.stringify([scenario]), {
+      fs.writeFileSync(scenarioFile, JSON.stringify(scenarioArray), {
         encoding: 'utf8',
       })
 
       const connector = new BaselConnector(dataDir)
       const specificInput = connector.translateInputIntoModel(generalInput)
 
-      assert.equal(specificInput.country, r.scenarioKey)
+      assert.equal(specificInput.name, r.scenarioKey)
       const expectedR0 = r.r0 ?? 2.7
-      assert.equal(specificInput.allParams.epidemiological.r0, expectedR0)
-      assert.deepEqual(specificInput.allParams.simulation.simulationTimeRange, {
-        tMin: new Date('2020-04-01'),
-        tMax: new Date('2022-03-22'),
+      assert.equal(specificInput.data.epidemiological.r0.begin, expectedR0)
+      assert.equal(
+        specificInput.data.population.ageDistributionName,
+        'country name placeholder for age distribution'
+      )
+      assert.equal(specificInput.data.simulation.numberStochasticRuns, 10)
+      assert.equal(specificInput.data.epidemiological.r0.end, expectedR0)
+      assert.deepEqual(specificInput.data.simulation.simulationTimeRange, {
+        begin: DateTime.fromISO('2020-04-01', { zone: 'utc' }).toMillis(),
+        end: DateTime.fromISO('2022-03-22', { zone: 'utc' }).toMillis(),
       })
-      assert.deepEqual(specificInput.allParams.containment, {
+      assert.deepEqual(specificInput.data.mitigation, {
         mitigationIntervals: [
           {
             color: 'black',
-            id: 'basel-model-social-distancing-general-population',
             name: 'Social distancing - general population',
-            mitigationValue: 50,
+            transmissionReduction: {
+              begin: 50,
+              end: 50,
+            },
             timeRange: {
-              tMin: new Date('2020-04-01'),
-              tMax: new Date('2020-04-08'),
+              begin: DateTime.fromISO('2020-04-01', { zone: 'utc' }).toMillis(),
+              end: DateTime.fromISO('2020-04-08', { zone: 'utc' }).toMillis(),
             },
           },
           {
             color: 'black',
-            id: 'basel-model-social-distancing-general-population',
             name: 'Social distancing - general population',
-            mitigationValue: 90,
+            transmissionReduction: { begin: 90, end: 90 },
             timeRange: {
-              tMin: new Date('2020-04-08'),
-              tMax: new Date('2020-07-01'),
+              begin: DateTime.fromISO('2020-04-08', { zone: 'utc' }).toMillis(),
+              end: DateTime.fromISO('2020-07-01', { zone: 'utc' }).toMillis(),
             },
           },
           {
             color: 'black',
-            id: 'basel-model-social-distancing-general-population',
             name: 'Social distancing - general population',
-            mitigationValue: 0,
+            transmissionReduction: { begin: 0, end: 0 },
             timeRange: {
-              tMin: new Date('2020-07-01'),
-              tMax: new Date('2022-03-22'),
+              begin: DateTime.fromISO('2020-07-01', { zone: 'utc' }).toMillis(),
+              end: DateTime.fromISO('2022-03-22', { zone: 'utc' }).toMillis(),
             },
           },
         ],
-        numberPoints: 0,
       })
     })
   })
@@ -190,9 +202,13 @@ suite('converting to Basel model input', () => {
 suite('converting from Basel model output', () => {
   test('can convert from model output with two timestamps', () => {
     const specificOutput: AlgorithmResult = {
-      deterministic: {
+      trajectory: {
+        // Deliberately blank as these are currently ignored.
+        lower: [],
+        upper: [],
+        percentile: {},
         // Sample data taken from the end of a result sequence.
-        trajectory: [
+        middle: [
           {
             time: 1583366400000,
             current: {
@@ -267,6 +283,18 @@ suite('converting from Basel model output', () => {
                 '70-79': 0.03974490432581387,
                 '80+': 0.03699774488871799,
                 total: 0.38854916525294725,
+              },
+              weeklyFatality: {
+                '0-9': 22.715714492873268,
+                '10-19': 133.79494311504567,
+                '20-29': 288.52988854260593,
+                '30-39': 743.1058476696137,
+                '40-49': 3014.296042600891,
+                '50-59': 10612.412199608014,
+                '60-69': 40792.89004316287,
+                '70-79': 80298.91773631038,
+                '80+': 104403.51804900041,
+                total: 240310.18046450272,
               },
             },
             cumulative: {
@@ -395,6 +423,18 @@ suite('converting from Basel model output', () => {
                 '80+': 0.036997744295259455,
                 total: 0.3885491580978565,
               },
+              weeklyFatality: {
+                '0-9': 8.184549287193477e-7,
+                '10-19': 0.000008230622825067258,
+                '20-29': 0.000017665262873833854,
+                '30-39': 0.0000783300366720141,
+                '40-49': 0.00032844103407114744,
+                '50-59': 0.0007602184668940026,
+                '60-69': 0.0057752351349336095,
+                '70-79': 0.00960950244916603,
+                '80+': 0.022747120267013088,
+                total: 0.039325561723671854,
+              },
             },
             cumulative: {
               recovered: {
@@ -449,8 +489,12 @@ suite('converting from Basel model output', () => {
           },
         ],
       },
-      stochastic: [],
-      params: null,
+      R0: {
+        lower: [],
+        upper: [],
+        mean: [],
+      },
+      plotData: [],
     }
     const parameters: input.ModelParameters = {
       calibrationDate: '2020-03-15',
@@ -470,7 +514,7 @@ suite('converting from Basel model output', () => {
     }
     const runInput: BaselRunnerModelInput = {
       binaryPath: 'test-path',
-      inputFiles: [],
+      inputFile: 'test-input-file.json',
       modelInput: generalInput,
     }
 
