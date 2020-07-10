@@ -4,7 +4,7 @@ WORKDIR /pyross
 
 COPY . .
 
-RUN make env && conda activate pyross && make
+RUN apt install make && cd /pyross && make env && conda activate pyross && make
 
 SHELL ["conda", "run", "-n", "pyross", "/bin/bash", "-c"]
 
