@@ -1,0 +1,25 @@
+version: "3.7"
+services:
+  run-model:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: release
+      args:
+        - PYROSS_VERSION=0.1
+    environment:
+      - MY_CUSTOM_VAR=/some/dir
+    volumes:
+      - ./test/test-job.json:/data/input/inputFile.json:ro
+      - ./output:/data/output:rw
+      - ./log:/data/log:rw
+
+  remote-image:
+    image: docker.pkg.github.com/${GITHUB_REPO:-rajeshrinet/pyross}/pyross-latest:latest
+    tty: true
+    environment:
+      - MY_CUSTOM_VAR=/some/dir
+    volumes:
+      - ./test/test-job.json:/data/input/inputFile.json:ro
+      - ./output:/data/output:rw
+      - ./log:/data/log:rw
